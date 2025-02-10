@@ -1,0 +1,11 @@
+kafka-python==2.0.2
+numpy==2.0.2
+opencv-python==4.11.0.86
+python-dotenv==1.0.1
+firebase-admin==6.3.0
+kafka-python==2.0.2
+requests==2.31.0
+torch==2.5.1
+transformers==4.48.1
+pillow==10.1.0
+python-dotenv==1.0.1
