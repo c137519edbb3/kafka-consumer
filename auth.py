@@ -26,7 +26,7 @@ class Auth:
             self.token = data.get('token')
             self.user = data.get('user')
             
-            print("Successfully authenticated with EyeconAI")
+            print("\n✅ Successfully authenticated with EyeconAI")
             return True
             
         except requests.exceptions.RequestException as e:

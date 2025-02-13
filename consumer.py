@@ -1,3 +1,4 @@
+from datetime import datetime
 import queue
 import time
 import json
@@ -34,6 +35,12 @@ class MLConsumer:
 
         self.auth = auth
         self.camera_manager = auth.camera_manager if auth else None
+        
+        # Start the periodic cache sync thread
+        self.sync_thread_running = threading.Event()
+        self.sync_thread_running.set()
+        self.sync_thread = threading.Thread(target=self._periodic_cache_sync, daemon=True)
+        self.sync_thread.start()
 
         self.writer_thread = threading.Thread(target=self.batch_write_logs, daemon=True)
         self.writer_thread.start()
@@ -45,21 +52,30 @@ class MLConsumer:
         except Exception as e:
             print(f"❌ Failed to enqueue log: {str(e)}")
 
+    def _periodic_cache_sync(self):
+        """Periodically syncs the camera cache in a separate thread"""
+        while self.sync_thread_running.is_set():
+            try:
+                if self.auth and self.camera_manager:
+                    print("🔄 Syncing camera cache...")
+                    self.auth.sync_cache()
+                    print("✅ Camera cache sync completed")
+            except Exception as e:
+                print(f"❌ Cache sync error: {str(e)}")
+            
+            time.sleep(self.camera_manager.SYNC_INTERVAL if self.camera_manager else 60)
+
     def process_stream(self):
         """Processes Kafka stream data with new data structure"""
         try:
-            print("Starting to process stream...")
+            print("🟢 Starting to process stream...")
             for message in self.consumer:
-                # print(f"Received message: {message.value}")
-                if self.camera_manager and self.camera_manager.needs_sync():
-                    self.auth.sync_cache()  # This will update camera_manager
-
                 frame_data = message.value["frame"]
                 organization_id = message.value["organization_id"]
                 camera_id = message.value["camera_id"]
                 timestamp = message.value["timestamp"]
 
-                # Get classes using new data manager
+                # Get classes using thread-safe camera manager
                 camera_classes = self.camera_manager.get_clip_classes(camera_id)
                 all_labels = list(camera_classes["good_classes"]) + list(camera_classes["bad_classes"])
                 self.model.set_labels(all_labels)
@@ -69,7 +85,7 @@ class MLConsumer:
 
                 if best_label in camera_classes["bad_classes"]:
                     category = "BAD CLASS ⚠️"
-                    # Get anomaly details for logging
+                    # Get anomaly details using thread-safe method
                     anomaly = self.camera_manager.get_anomaly_details(camera_id, best_label)
                     if anomaly:
                         log_entry = {
@@ -88,54 +104,44 @@ class MLConsumer:
                 else:
                     category = "UNKNOWN"
 
-                print(f"\nTimestamp: {timestamp}")
+                print(f"\nTimestamp: {datetime.fromtimestamp(float(timestamp)).strftime('%A %d %b %I:%M:%S:%f %p')[:-3]}")
                 print(f"{best_label} ({best_confidence*100:.2f}%) - {category}")
                 print("-------------------")
 
         except KeyboardInterrupt:
             print("Stopping consumer...")
+            self.sync_thread_running.clear()  # Signal sync thread to stop
+            self.sync_thread.join()  # Wait for sync thread to finish
         finally:
             self.consumer.close()
 
     def batch_write_logs(self):
-        """
-        Batch writes logs to Firestore with proper anomaly information.
-        Uses batching for better performance and transaction safety.
-        """
         while True:
             batch_data = []
-            batch = self.db.batch()  # Create a new batch
-            
-            # Collect logs up to BATCH_SIZE
+            batch = self.db.batch()
             while not self.log_queue.empty() and len(batch_data) < self.BATCH_SIZE:
                 try:
-                    organization_id, camera_id, log_data = self.log_queue.get_nowait()
-                    
-                    # Validate required fields
+                    organization_id, camera_id, log_data = self.log_queue.get_nowait()                
                     if not all([organization_id, camera_id, log_data]):
                         print(f"❌ Invalid log data: org_id={organization_id}, camera_id={camera_id}")
                         continue
 
-                    # Ensure all fields are properly formatted
                     log_data.update({
                         "timestamp": log_data.get("timestamp", time.time()),
                         "camera_id": int(camera_id),
                         "organization_id": int(organization_id),
                     })
 
-                    # Add to batch data
                     batch_data.append((organization_id, camera_id, log_data))
                     
                 except queue.Empty:
-                    break  # Queue is empty
+                    break
                 except Exception as e:
                     print(f"❌ Error processing log entry: {str(e)}")
                     continue
 
-            # Process batch if we have data
             if batch_data:
                 try:
-                    # Add each log to the batch
                     for org_id, cam_id, log_data in batch_data:
                         log_ref = (
                             self.db_ref
@@ -143,7 +149,7 @@ class MLConsumer:
                             .collection("cameras")
                             .document(str(cam_id))
                             .collection("logs")
-                            .document()  # Auto-generate document ID
+                            .document()
                         )
                         batch.set(log_ref, log_data)
 
