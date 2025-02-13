@@ -50,6 +50,7 @@ class MLConsumer:
         try:
             print("Starting to process stream...")
             for message in self.consumer:
+                print(f"Received message: {message.value}")
                 if self.camera_manager and self.camera_manager.needs_sync():
                     self.auth.sync_cache()  # This will update camera_manager
 
